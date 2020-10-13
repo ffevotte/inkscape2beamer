@@ -1,0 +1,103 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""Convertit une image SVG en animation PDF.
+
+Les différents calques définissent les étapes de l'animation."""
+
+import sys
+import subprocess
+from xml.dom import minidom
+from optparse import OptionParser
+
+def getIdAndLabelOfLayerFromSVG(svgFile):
+    "Récupere la liste des calques"
+    svgXML = minidom.parse (svgFile)
+    listOfElement = svgXML.getElementsByTagName ("g")
+    res = []
+    for element in listOfElement:
+        dic = {}
+        for i in element.attributes.keys():
+            dic[str(i)] = str(element.attributes[i].value)
+
+        if (dic.has_key ("inkscape:groupmode")
+            and dic["inkscape:groupmode"] == 'layer'):
+            res += [(dic["id"], dic["inkscape:label"])]
+    return res
+
+def exportOneLayerToPdf(layerId, options, pdfOutput):
+    "Exporte un calque en PDF"
+    svgInput = options.svgInput
+
+    sys.stderr.write ("Exporting layer: %s...\n" % pdfOutput)
+    p = subprocess.Popen (["inkscape", "--without-gui", "-C",
+                           "--export-id-only",
+                           "--export-id=%s"  % layerId,
+                           "--export-pdf=%s" % pdfOutput,
+                           svgInput])
+    p.wait()
+
+def niceName(name):
+    "Élimine les caractères spéciaux dans les noms"
+    res = name.replace (" ", "_")
+    res = res.replace (".", "_")
+    return res
+
+def pdfSlides(options):
+    "Exporte les calques en PDF et génère les fichiers d'inclusion LaTeX"
+    svgInput = options.svgInput
+    varFig   = options.path
+
+
+    texPreamble = []
+    texPreamble.append (r"%% generated with `%s'" % str(sys.argv))
+    texPreamble.append (r"\def\varFigRep{%s}"    % varFig)
+
+    texSeq = []
+    texInc = [r"\begin{tikzpicture}"]
+
+    layers = getIdAndLabelOfLayerFromSVG(svgInput)
+    for index in xrange(len(layers)):
+        (layer, label) = layers[index]
+        pdfFileName = svgInput.replace(".svg", "_%s.pdf" % niceName(label))
+        exportOneLayerToPdf(layer, options, pdfFileName)
+
+        texSeq.append (r"\includegraphics<%d>[width=%s]{\varFigRep/%s}" % (
+            index+1, options.width, pdfFileName))
+        texInc.append (  r"\only<%d->{\node at (0,0) {" % (index+1)
+                       + r"\includegraphics[width=%s]{\varFigRep/%s}}};" % (
+                           options.width, pdfFileName))
+
+    texFileName = svgInput.replace(".svg", "_seq.tex")
+    sys.stderr.write ("Generating include file: %s...\n" % texFileName)
+    with open (texFileName, "w") as texFile:
+        texFile.write ("\n".join(texPreamble + texSeq))
+
+    texFileName = svgInput.replace(".svg", "_inc.tex")
+    sys.stderr.write ("Generating include file: %s...\n" % texFileName)
+    texInc.append(r"\end{tikzpicture}")
+    with open (texFileName, "w") as texFile:
+        texFile.write ("\n".join(texPreamble + texInc))
+
+def main ():
+    "Fonction principale"
+    parser = OptionParser()
+    parser.add_option(
+        "-p", "--path", dest="path",
+        help="prepend figures names with PATH for inclusion in LaTeX",
+        default = ".",
+        metavar="PATH")
+    parser.add_option(
+        "-w", "--width", dest="width",
+        default="\\linewidth",
+        help="set the figure width")
+
+    (options, args) = parser.parse_args()
+    if len(args) < 1:
+        sys.stderr.write ("Not enough arguments\n")
+        parser.print_help()
+    else:
+        options.svgInput = args[0]
+        pdfSlides (options)
+
+if __name__ == "__main__":
+    main ()
