@@ -12,15 +12,79 @@ import subprocess
 from xml.dom import minidom
 from optparse import OptionParser
 
+class Layer:
+    frame = 0
+
+    def parseLabel(self, label):
+        val = label.split("|")
+        steps = ""
+        zorder = ""
+
+        if len(val) == 1:
+            name = val[0]
+        elif len(val) == 2:
+            steps = val[0]
+            name = val[1]
+        else:
+            steps = val[0]
+            zorder = val[1]
+            name = val[2]
+
+        return (steps, zorder, name)
+
+
+    def absStep(self, relStep):
+        if relStep.startswith("+"):
+            return str(Layer.frame + int(relStep))
+        else:
+            return relStep
+
+
+    def parseSteps(self, steps):
+        if steps == "":
+            steps = "+1:"
+
+        v = steps.split(":")
+        if len(v) > 1:
+            begin = v[0]
+            end   = v[1]
+        else:
+            begin = steps
+            end   = "+0"
+
+        begin = self.absStep(begin)
+        Layer.frame = int(begin)
+        end   = self.absStep(end)
+
+        return "%s-%s" % (begin, end)
+
+
+    def __init__(self, layerId, label):
+        self.layerId = layerId
+
+        (steps, zorder, name) = self.parseLabel(label)
+
+        self.steps  = self.parseSteps(steps)
+
+        if zorder == "":
+            zorder = "10"
+        self.zorder = int(zorder)
+
+        self.name = sanitize(name)
+
+
+    def __str__(self):
+        return "%-10s %3d  %-6s %s" % (self.layerId, self.zorder, self.steps, self.name)
+
 def getLayers(svgFile):
     "Get a list of SVG layers"
 
     svgXML = minidom.parse (svgFile)
     elements = svgXML.getElementsByTagName ("g")
-    res = []
+    res = {}
 
     sys.stderr.write("Collecting layers...\n")
-    sys.stderr.write("  %-15s -> %s\n" % ("Layer id", "Name"))
+    sys.stderr.write("  %-10s %3s  %-6s %s\n" % ("Id", "Z", "Steps", "Name"))
     sys.stderr.write("  " + "-"*38 + "\n")
     for element in elements:
         dic = {}
@@ -29,8 +93,13 @@ def getLayers(svgFile):
 
         if (dic.has_key ("inkscape:groupmode")
             and dic["inkscape:groupmode"] == 'layer'):
-            res += [(dic["id"], dic["inkscape:label"])]
-            sys.stderr.write("  %-15s -> %s\n" % (dic["id"], dic["inkscape:label"]))
+            layer = Layer(dic["id"], dic["inkscape:label"])
+            sys.stderr.write("  %s\n" % layer)
+
+            z = layer.zorder
+            if z not in res:
+                res[z] = []
+            res[z].append(layer)
 
     return res
 
@@ -53,9 +122,12 @@ def sanitize(name):
     res = res.replace (".", "_")
     return res
 
+def logGeneration(name):
+    sys.stderr.write ("  %-33s" % (name + "..."))
+
 def writeTex(svgFile, suffix, preamble, contents):
     out = svgFile.replace(".svg", suffix)
-    sys.stderr.write ("  %-33s" % (out + "..."))
+    logGeneration(out)
     with open (out, "w") as texFile:
         texFile.write ("\n".join(preamble))
         texFile.write ("\n")
@@ -63,80 +135,60 @@ def writeTex(svgFile, suffix, preamble, contents):
         texFile.write ("\n")
     sys.stderr.write (" done\n")
 
-def generateFrames(options):
-    """Export SVG layers to PDF frames.
+TEST_TEMPLATE = r"""
+\documentclass{beamer}
+\usepackage{tikz}
+\begin{document}
+\begin{frame}
+  \def\figPath{.}
+  \def\figWidth{\linewidth}
+  \input{%s.tex}
+\end{frame}
+\end{document}
+"""
 
-Also produce template LaTeX files to generate sequential and incremental Beamer
-animations from the frames."""
+def generate(options):
+    "Export SVG layers to PDF frames & generate LaTeX files."
+
     svgInput = options.svgInput
-    figPath  = options.path
-    figWidth = options.width
-
-    texPreamble = []
-    texPreamble.append (r"%% generated with `%s'" % str(sys.argv))
-
-    texSeq = []
-    texInc = [r"\begin{tikzpicture}"]
-
-    texSeqTmpl = r"\includegraphics<%d>[width=\figWidth]{\figPath/%s}"
-    texIncTmpl = r"\only<%d->{\draw(0,0)node{\includegraphics[width=\figWidth]{\figPath/%s}}};"
+    baseName = svgInput.replace(".svg", "")
 
     layers = getLayers(svgInput)
 
-    sys.stderr.write("\nGenerating frames:\n")
-    for index in xrange(len(layers)):
-        (layerId, layerName) = layers[index]
+    sys.stderr.write("\nGenerating PDF frames:\n")
 
-        pdfOutput = svgInput.replace(".svg", "_%s.pdf" % sanitize(layerName))
-        exportLayer(svgInput, layerId, pdfOutput)
+    tex = [r"%% generated with %s" % str(sys.argv),
+           r"\begin{tikzpicture}"]
+    texTemplate = r"\only<%s>{\draw(0,0)node{\includegraphics[width=\figWidth]{\figPath/%s}}};"
+    for z in sorted(layers.keys()):
+        if z == 0:
+            continue
 
-        texSeq.append (texSeqTmpl % (index+1, pdfOutput))
-        texInc.append (texIncTmpl % (index+1, pdfOutput))
-    texInc.append(r"\end{tikzpicture}")
+        for layer in layers[z]:
+            pdfOutput = "%s_%s.pdf" % (baseName, layer.name)
+            exportLayer(svgInput, layer.layerId, pdfOutput)
 
-    sys.stderr.write("\nGenerating TeX templates:\n")
-    writeTex(svgInput, "-seq.tex", texPreamble, texSeq)
-    writeTex(svgInput, "-inc.tex", texPreamble, texInc)
+            tex.append (texTemplate % (layer.steps, pdfOutput))
+    tex.append(r"\end{tikzpicture}")
 
-def generateTex(options):
-    baseName = options.svgInput.replace(".svg", "")
-    texName = baseName+"-test.tex"
+    sys.stderr.write("Generating LaTeX files:\n")
 
-    sys.stderr.write("  %-33s" % (texName + "..."))
-    with open(texName, "w") as f:
-        f.write(r"""
-        \documentclass{beamer}
-        \usepackage{tikz}
-        \begin{document}
-        \begin{frame}
-          \def\figPath{%s}
-          \def\figWidth{%s}
-          \input{%s-%s}
-        \end{frame}
-        \end{document}
-        """ % (
-            options.path,
-            options.width,
-            baseName, options.anim))
+    texFile = "%s.tex" % baseName
+    logGeneration(texFile)
+    with open (texFile, "w") as texFile:
+        texFile.write ("\n".join(tex))
+        texFile.write ("\n")
+    sys.stderr.write(" done\n")
+
+    texFile = "%s-test.tex" % baseName
+    logGeneration(texFile)
+    with open(texFile, "w") as f:
+        f.write(TEST_TEMPLATE % baseName)
     sys.stderr.write(" done\n")
 
 def main ():
     "Entry point"
     parser = OptionParser()
-    parser.add_option(
-        "-p", "--path", dest = "path",
-        help    = "prepend figures names with PATH for inclusion in LaTeX",
-        default = ".")
-    parser.add_option(
-        "-w", "--width", dest = "width",
-        help    = "set the figure width",
-        default = r"\linewidth")
-    parser.add_option(
-        "-a", "--anim", dest = "anim",
-        help    = "set the animation style",
-        default = "seq",
-        metavar = "[seq|inc|CUSTOM_NAME]"
-    )
 
     (options, args) = parser.parse_args()
     if len(args) < 1:
@@ -144,8 +196,7 @@ def main ():
         parser.print_help()
     else:
         options.svgInput = args[0]
-        generateFrames (options)
-        generateTex    (options)
+        generate (options)
 
 if __name__ == "__main__":
     main ()
