@@ -1,20 +1,28 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
-"""Convertit une image SVG en animation PDF.
+"""Convert an SVG image into one PDF per layer.
 
-Les différents calques définissent les étapes de l'animation."""
+This helps generating Beamer animations by adding one layer at a time
+(incremental animation) or displaying one layer after the other (sequential
+animation).
+"""
 
 import sys
 import subprocess
 from xml.dom import minidom
 from optparse import OptionParser
 
-def getIdAndLabelOfLayerFromSVG(svgFile):
-    "Récupere la liste des calques"
+def getLayers(svgFile):
+    "Get a list of SVG layers"
+
     svgXML = minidom.parse (svgFile)
-    listOfElement = svgXML.getElementsByTagName ("g")
+    elements = svgXML.getElementsByTagName ("g")
     res = []
-    for element in listOfElement:
+
+    sys.stderr.write("Collecting layers...\n")
+    sys.stderr.write("  %-15s -> %s\n" % ("Layer id", "Name"))
+    sys.stderr.write("  " + "-"*38 + "\n")
+    for element in elements:
         dic = {}
         for i in element.attributes.keys():
             dic[str(i)] = str(element.attributes[i].value)
@@ -22,74 +30,113 @@ def getIdAndLabelOfLayerFromSVG(svgFile):
         if (dic.has_key ("inkscape:groupmode")
             and dic["inkscape:groupmode"] == 'layer'):
             res += [(dic["id"], dic["inkscape:label"])]
+            sys.stderr.write("  %-15s -> %s\n" % (dic["id"], dic["inkscape:label"]))
+
     return res
 
-def exportOneLayerToPdf(layerId, options, pdfOutput):
-    "Exporte un calque en PDF"
-    svgInput = options.svgInput
+def exportLayer(svgFile, layerId, pdfOutput):
+    "Export a layer to pdf"
 
-    sys.stderr.write ("Exporting layer: %s...\n" % pdfOutput)
-    p = subprocess.Popen (["inkscape", "--without-gui", "-C",
+    sys.stderr.write ("  %-33s" % (pdfOutput + "..."))
+    p = subprocess.Popen (["inkscape", "--without-gui",
+                           "--export-area-page",
                            "--export-id-only",
                            "--export-id=%s"  % layerId,
                            "--export-pdf=%s" % pdfOutput,
-                           svgInput])
+                           svgFile])
     p.wait()
+    sys.stderr.write (" done\n")
 
-def niceName(name):
-    "Élimine les caractères spéciaux dans les noms"
+def sanitize(name):
+    "Sanitize a layer name to get a reasonable file name"
     res = name.replace (" ", "_")
     res = res.replace (".", "_")
     return res
 
-def pdfSlides(options):
-    "Exporte les calques en PDF et génère les fichiers d'inclusion LaTeX"
-    svgInput = options.svgInput
-    varFig   = options.path
+def writeTex(svgFile, suffix, preamble, contents):
+    out = svgFile.replace(".svg", suffix)
+    sys.stderr.write ("  %-33s" % (out + "..."))
+    with open (out, "w") as texFile:
+        texFile.write ("\n".join(preamble))
+        texFile.write ("\n")
+        texFile.write ("\n".join(contents))
+        texFile.write ("\n")
+    sys.stderr.write (" done\n")
 
+def generateFrames(options):
+    """Export SVG layers to PDF frames.
+
+Also produce template LaTeX files to generate sequential and incremental Beamer
+animations from the frames."""
+    svgInput = options.svgInput
+    figPath  = options.path
+    figWidth = options.width
 
     texPreamble = []
     texPreamble.append (r"%% generated with `%s'" % str(sys.argv))
-    texPreamble.append (r"\def\varFigRep{%s}"    % varFig)
 
     texSeq = []
     texInc = [r"\begin{tikzpicture}"]
 
-    layers = getIdAndLabelOfLayerFromSVG(svgInput)
+    texSeqTmpl = r"\includegraphics<%d>[width=\figWidth]{\figPath/%s}"
+    texIncTmpl = r"\only<%d->{\draw(0,0)node{\includegraphics[width=\figWidth]{\figPath/%s}}};"
+
+    layers = getLayers(svgInput)
+
+    sys.stderr.write("\nGenerating frames:\n")
     for index in xrange(len(layers)):
-        (layer, label) = layers[index]
-        pdfFileName = svgInput.replace(".svg", "_%s.pdf" % niceName(label))
-        exportOneLayerToPdf(layer, options, pdfFileName)
+        (layerId, layerName) = layers[index]
 
-        texSeq.append (r"\includegraphics<%d>[width=%s]{\varFigRep/%s}" % (
-            index+1, options.width, pdfFileName))
-        texInc.append (  r"\only<%d->{\node at (0,0) {" % (index+1)
-                       + r"\includegraphics[width=%s]{\varFigRep/%s}}};" % (
-                           options.width, pdfFileName))
+        pdfOutput = svgInput.replace(".svg", "_%s.pdf" % sanitize(layerName))
+        exportLayer(svgInput, layerId, pdfOutput)
 
-    texFileName = svgInput.replace(".svg", "_seq.tex")
-    sys.stderr.write ("Generating include file: %s...\n" % texFileName)
-    with open (texFileName, "w") as texFile:
-        texFile.write ("\n".join(texPreamble + texSeq))
-
-    texFileName = svgInput.replace(".svg", "_inc.tex")
-    sys.stderr.write ("Generating include file: %s...\n" % texFileName)
+        texSeq.append (texSeqTmpl % (index+1, pdfOutput))
+        texInc.append (texIncTmpl % (index+1, pdfOutput))
     texInc.append(r"\end{tikzpicture}")
-    with open (texFileName, "w") as texFile:
-        texFile.write ("\n".join(texPreamble + texInc))
+
+    sys.stderr.write("\nGenerating TeX templates:\n")
+    writeTex(svgInput, "-seq.tex", texPreamble, texSeq)
+    writeTex(svgInput, "-inc.tex", texPreamble, texInc)
+
+def generateTex(options):
+    baseName = options.svgInput.replace(".svg", "")
+    texName = baseName+"-test.tex"
+
+    sys.stderr.write("  %-33s" % (texName + "..."))
+    with open(texName, "w") as f:
+        f.write(r"""
+        \documentclass{beamer}
+        \usepackage{tikz}
+        \begin{document}
+        \begin{frame}
+          \def\figPath{%s}
+          \def\figWidth{%s}
+          \input{%s-%s}
+        \end{frame}
+        \end{document}
+        """ % (
+            options.path,
+            options.width,
+            baseName, options.anim))
+    sys.stderr.write(" done\n")
 
 def main ():
-    "Fonction principale"
+    "Entry point"
     parser = OptionParser()
     parser.add_option(
-        "-p", "--path", dest="path",
-        help="prepend figures names with PATH for inclusion in LaTeX",
-        default = ".",
-        metavar="PATH")
+        "-p", "--path", dest = "path",
+        help    = "prepend figures names with PATH for inclusion in LaTeX",
+        default = ".")
     parser.add_option(
-        "-w", "--width", dest="width",
-        default="\\linewidth",
-        help="set the figure width")
+        "-w", "--width", dest = "width",
+        help    = "set the figure width",
+        default = r"\linewidth")
+    parser.add_option(
+        "-a", "--anim", dest = "anim",
+        help    = "set the animation style",
+        default = "seq",
+        metavar = "[seq|inc|CUSTOM_NAME]"
+    )
 
     (options, args) = parser.parse_args()
     if len(args) < 1:
@@ -97,7 +144,8 @@ def main ():
         parser.print_help()
     else:
         options.svgInput = args[0]
-        pdfSlides (options)
+        generateFrames (options)
+        generateTex    (options)
 
 if __name__ == "__main__":
     main ()
